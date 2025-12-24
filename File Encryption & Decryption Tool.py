@@ -3,163 +3,216 @@ import os
 import hashlib
 import base64
 import requests
+import validators
+from PIL import Image
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives import hashes
 from cryptography.fernet import Fernet
+from scapy.all import rdpcap
 
-# ---------------- CONFIG ----------------
-st.set_page_config(page_title="Cyber Security Tool", layout="wide")
+# ---------------- BASIC CONFIG ----------------
+st.set_page_config(page_title="Cyber Security Toolkit", layout="wide")
 
-os.makedirs("encrypted_files", exist_ok=True)
-os.makedirs("decrypted_files", exist_ok=True)
+for d in ["encrypted_files", "decrypted_files", "stego_images"]:
+    os.makedirs(d, exist_ok=True)
 
-ATTEMPT_LIMIT = 3
-if "attempts" not in st.session_state:
-    st.session_state.attempts = 0
-
-# ---------------- ENCRYPTION FUNCTIONS ----------------
-def generate_key(password, salt):
+# ======================================================
+# 🔐 ENCRYPTION FUNCTIONS
+# ======================================================
+def gen_key(password, salt):
     kdf = PBKDF2HMAC(
         algorithm=hashes.SHA256(),
         length=32,
         salt=salt,
-        iterations=100000,
+        iterations=100000
     )
     return base64.urlsafe_b64encode(kdf.derive(password.encode()))
 
-def sha256_hash(data):
-    return hashlib.sha256(data).hexdigest()
-
-def encrypt_file(data, password):
+def encrypt_data(data, password):
     salt = os.urandom(16)
-    key = generate_key(password, salt)
+    key = gen_key(password, salt)
     encrypted = Fernet(key).encrypt(data)
-    return salt + encrypted, sha256_hash(data)
+    return salt + encrypted, hashlib.sha256(data).hexdigest()
 
-def decrypt_file(data, password, original_hash):
+def decrypt_data(data, password, original_hash):
     salt = data[:16]
-    encrypted_data = data[16:]
-    key = generate_key(password, salt)
-    decrypted = Fernet(key).decrypt(encrypted_data)
+    enc = data[16:]
+    key = gen_key(password, salt)
+    dec = Fernet(key).decrypt(enc)
+    if hashlib.sha256(dec).hexdigest() != original_hash:
+        raise ValueError("Integrity failed")
+    return dec
 
-    if sha256_hash(decrypted) != original_hash:
-        raise ValueError("Integrity check failed")
-    return decrypted
-
-# ---------------- VULNERABILITY FUNCTIONS ----------------
+# ======================================================
+# 🕷️ VULNERABILITY SCANNERS
+# ======================================================
 def scan_file(file):
-    findings = []
+    issues = []
     if file.size > 5 * 1024 * 1024:
-        findings.append("Large file size – possible payload risk")
+        issues.append("Large file size")
     if file.name.endswith((".exe", ".bat", ".js")):
-        findings.append("Executable file detected")
-    if not findings:
-        findings.append("No common file vulnerabilities found")
-    return findings
+        issues.append("Executable file detected")
+    return issues or ["No major file risks found"]
 
 def scan_website(url):
-    results = []
+    findings = []
     try:
-        response = requests.get(url, timeout=5)
-        headers = response.headers
-
-        if "X-Frame-Options" not in headers:
-            results.append("Missing X-Frame-Options (Clickjacking risk)")
-        if "Content-Security-Policy" not in headers:
-            results.append("Missing Content-Security-Policy")
-        if "Strict-Transport-Security" not in headers:
-            results.append("Missing HSTS header")
-        if not results:
-            results.append("No major header vulnerabilities found")
+        r = requests.get(url, timeout=5)
+        h = r.headers
+        if "Content-Security-Policy" not in h:
+            findings.append("Missing CSP header")
+        if "X-Frame-Options" not in h:
+            findings.append("Missing X-Frame-Options")
+        if "Strict-Transport-Security" not in h:
+            findings.append("Missing HSTS")
     except:
-        results.append("Website unreachable or invalid URL")
+        findings.append("Invalid or unreachable URL")
+    return findings or ["No major web vulnerabilities"]
 
-    return results
+# ======================================================
+# 🎣 PHISHING LINK DETECTOR
+# ======================================================
+def phishing_check(url):
+    flags = []
+    if not validators.url(url):
+        flags.append("Invalid URL format")
+    if "@" in url:
+        flags.append("URL contains @ symbol")
+    if url.count("-") > 3:
+        flags.append("Suspicious hyphen usage")
+    if url.startswith("http://"):
+        flags.append("Not using HTTPS")
+    return flags or ["No obvious phishing indicators"]
 
-# ---------------- SIDEBAR NAVIGATION ----------------
-st.sidebar.title("🛡️ Cyber Security Tool")
-page = st.sidebar.radio(
-    "Select Module",
-    ["🔐 File Encryption", "🕷️ Vulnerability Scanner"]
-)
+# ======================================================
+# 🖼️ IMAGE STEGANOGRAPHY
+# ======================================================
+def hide_text(image, text):
+    img = image.convert("RGB")
+    data = img.load()
+    text += "#####"
+    bits = ''.join(format(ord(c), '08b') for c in text)
+    idx = 0
 
-# ===================================================
-# 🔐 PAGE 1: FILE ENCRYPTION
-# ===================================================
+    for y in range(img.height):
+        for x in range(img.width):
+            if idx < len(bits):
+                r, g, b = data[x, y]
+                r = (r & ~1) | int(bits[idx])
+                data[x, y] = (r, g, b)
+                idx += 1
+    return img
+
+def reveal_text(image):
+    img = image.convert("RGB")
+    data = img.load()
+    bits = ""
+
+    for y in range(img.height):
+        for x in range(img.width):
+            bits += str(data[x, y][0] & 1)
+
+    chars = [bits[i:i+8] for i in range(0, len(bits), 8)]
+    text = ""
+    for c in chars:
+        text += chr(int(c, 2))
+        if text.endswith("#####"):
+            return text.replace("#####", "")
+    return "No hidden message"
+
+# ======================================================
+# 📡 PACKET ANALYZER (PCAP)
+# ======================================================
+def analyze_pcap(file):
+    packets = rdpcap(file)
+    summary = {}
+    for pkt in packets:
+        proto = pkt.summary().split()[0]
+        summary[proto] = summary.get(proto, 0) + 1
+    return summary
+
+# ======================================================
+# 📶 WIFI SECURITY ANALYZER (AUDIT)
+# ======================================================
+def wifi_audit():
+    return [
+        "Check WPA2/WPA3 encryption enabled",
+        "Disable WPS",
+        "Use strong Wi-Fi password",
+        "Change default router credentials",
+        "Update router firmware"
+    ]
+
+# ======================================================
+# 🧭 SIDEBAR NAVIGATION
+# ======================================================
+st.sidebar.title("🛡️ Cyber Security Toolkit")
+page = st.sidebar.radio("Select Module", [
+    "🔐 File Encryption",
+    "🕷️ Vulnerability Scanner",
+    "🎣 Phishing Detector",
+    "🖼️ Image Steganography",
+    "📡 Packet Analyzer",
+    "📶 Wi-Fi Security Analyzer"
+])
+
+# ======================================================
+# 🔐 PAGE 1
+# ======================================================
 if page == "🔐 File Encryption":
-    st.title("🔐 Secure File Encryption & Decryption")
+    st.header("Secure File Encryption")
+    f = st.file_uploader("Upload File")
+    pwd = st.text_input("Password", type="password")
+    if f and pwd and st.button("Encrypt"):
+        enc, h = encrypt_data(f.read(), pwd)
+        st.download_button("Download Encrypted", enc, f.name + ".encrypted")
 
-    action = st.selectbox("Choose Action", ["Encrypt File", "Decrypt File"])
-
-    # ---------- ENCRYPT ----------
-    if action == "Encrypt File":
-        file = st.file_uploader("Upload File")
-        password = st.text_input("Set Password", type="password")
-
-        if file and password and st.button("Encrypt"):
-            encrypted, file_hash = encrypt_file(file.read(), password)
-
-            with open(f"encrypted_files/{file.name}.encrypted", "wb") as f:
-                f.write(encrypted)
-
-            with open(f"encrypted_files/{file.name}.hash", "w") as h:
-                h.write(file_hash)
-
-            st.success("File encrypted successfully")
-            st.download_button("Download Encrypted File", encrypted, file.name + ".encrypted")
-
-    # ---------- DECRYPT ----------
+# ======================================================
+# 🕷️ PAGE 2
+# ======================================================
+elif page == "🕷️ Vulnerability Scanner":
+    choice = st.selectbox("Scan Type", ["File", "Website"])
+    if choice == "File":
+        f = st.file_uploader("Upload File")
+        if f and st.button("Scan"):
+            st.write(scan_file(f))
     else:
-        encrypted_file = st.file_uploader("Upload Encrypted File")
-        hash_file = st.file_uploader("Upload Hash File")
-        password = st.text_input("Enter Password", type="password")
+        url = st.text_input("Website URL")
+        if url and st.button("Scan"):
+            st.write(scan_website(url))
 
-        if encrypted_file and hash_file and password:
-            if st.session_state.attempts >= ATTEMPT_LIMIT:
-                st.error("Too many wrong attempts")
-                st.stop()
+# ======================================================
+# 🎣 PAGE 3
+# ======================================================
+elif page == "🎣 Phishing Detector":
+    url = st.text_input("Enter URL")
+    if url and st.button("Check"):
+        st.write(phishing_check(url))
 
-            if st.button("Decrypt"):
-                try:
-                    original_hash = hash_file.read().decode()
-                    decrypted = decrypt_file(encrypted_file.read(), password, original_hash)
+# ======================================================
+# 🖼️ PAGE 4
+# ======================================================
+elif page == "🖼️ Image Steganography":
+    img = st.file_uploader("Upload Image")
+    msg = st.text_input("Secret Message")
+    if img and msg and st.button("Hide Message"):
+        result = hide_text(Image.open(img), msg)
+        st.image(result)
+    if img and st.button("Reveal Message"):
+        st.write(reveal_text(Image.open(img)))
 
-                    filename = encrypted_file.name.replace(".encrypted", "")
-                    with open(f"decrypted_files/{filename}", "wb") as f:
-                        f.write(decrypted)
+# ======================================================
+# 📡 PAGE 5
+# ======================================================
+elif page == "📡 Packet Analyzer":
+    pcap = st.file_uploader("Upload PCAP file")
+    if pcap and st.button("Analyze"):
+        st.write(analyze_pcap(pcap))
 
-                    st.success("File decrypted successfully")
-                    st.download_button("Download Decrypted File", decrypted, filename)
-                    st.session_state.attempts = 0
-
-                except:
-                    st.session_state.attempts += 1
-                    st.error(f"Wrong password or tampered file ({st.session_state.attempts}/3)")
-
-# ===================================================
-# 🕷️ PAGE 2: VULNERABILITY SCANNER
-# ===================================================
-else:
-    st.title("🕷️ Vulnerability Scanner")
-
-    scan_type = st.selectbox("Scan Type", ["File Scanner", "Website Scanner"])
-
-    # ---------- FILE SCANNER ----------
-    if scan_type == "File Scanner":
-        file = st.file_uploader("Upload File to Scan")
-
-        if file and st.button("Scan File"):
-            results = scan_file(file)
-            st.subheader("Scan Results")
-            for r in results:
-                st.warning(r)
-
-    # ---------- WEBSITE SCANNER ----------
-    else:
-        url = st.text_input("Enter Website URL (https://example.com)")
-
-        if url and st.button("Scan Website"):
-            results = scan_website(url)
-            st.subheader("Scan Results")
-            for r in results:
-                st.warning(r)
+# ======================================================
+# 📶 PAGE 6
+# ======================================================
+elif page == "📶 Wi-Fi Security Analyzer":
+    st.subheader("Wi-Fi Security Best Practices")
+    for tip in wifi_audit():
+        st.success(tip)
