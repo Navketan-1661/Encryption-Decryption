@@ -1,2 +1,5 @@
 streamlit
 cryptography
+requests
+pillow
+scapy
