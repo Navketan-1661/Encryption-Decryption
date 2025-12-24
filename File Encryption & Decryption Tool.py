@@ -1,91 +1,102 @@
 import streamlit as st
 import os
+import hashlib
+import base64
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from cryptography.hazmat.primitives import hashes
+from cryptography.fernet import Fernet
 
-# ---------- SAFE IMPORT ----------
-try:
-    from cryptography.fernet import Fernet
-except ImportError:
-    st.error("❌ cryptography library not installed.")
-    st.info("Add 'cryptography' to requirements.txt and restart the app.")
-    st.stop()
+# ---------------- CONFIG ----------------
+st.set_page_config(page_title="Secure File Encryption Tool", layout="centered")
 
-# ---------- CONFIG ----------
-st.set_page_config(page_title="File Encryption Tool", layout="centered")
+os.makedirs("encrypted_files", exist_ok=True)
+os.makedirs("decrypted_files", exist_ok=True)
 
-KEY_FILE = "secret.key"
-ENC_DIR = "encrypted_files"
-DEC_DIR = "decrypted_files"
+ATTEMPT_LIMIT = 3
+if "attempts" not in st.session_state:
+    st.session_state.attempts = 0
 
-os.makedirs(ENC_DIR, exist_ok=True)
-os.makedirs(DEC_DIR, exist_ok=True)
+# ---------------- FUNCTIONS ----------------
+def generate_key_from_password(password: str, salt: bytes):
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        iterations=100000,
+    )
+    return base64.urlsafe_b64encode(kdf.derive(password.encode()))
 
-# ---------- FUNCTIONS ----------
-def generate_key():
-    key = Fernet.generate_key()
-    with open(KEY_FILE, "wb") as f:
-        f.write(key)
-    return key
+def calculate_hash(data: bytes):
+    return hashlib.sha256(data).hexdigest()
 
-def load_key():
-    if not os.path.exists(KEY_FILE):
-        return None
-    with open(KEY_FILE, "rb") as f:
-        return f.read()
+def encrypt_file(data, password):
+    salt = os.urandom(16)
+    key = generate_key_from_password(password, salt)
+    encrypted = Fernet(key).encrypt(data)
+    file_hash = calculate_hash(data)
+    return salt + encrypted, file_hash
 
-def encrypt_data(data, key):
-    return Fernet(key).encrypt(data)
+def decrypt_file(data, password, original_hash):
+    salt = data[:16]
+    encrypted_data = data[16:]
+    key = generate_key_from_password(password, salt)
+    decrypted = Fernet(key).decrypt(encrypted_data)
 
-def decrypt_data(data, key):
-    return Fernet(key).decrypt(data)
+    if calculate_hash(decrypted) != original_hash:
+        raise ValueError("File integrity check failed")
 
-# ---------- UI ----------
-st.title("🔐 File Encryption & Decryption Tool")
+    return decrypted
 
-menu = st.radio("Choose Action", ["Generate Key", "Encrypt File", "Decrypt File"])
+# ---------------- UI ----------------
+st.title("🔐 Secure File Encryption & Decryption Tool")
 
-# ---------- GENERATE KEY ----------
-if menu == "Generate Key":
-    if st.button("Generate Secret Key"):
-        key = generate_key()
-        st.success("✅ Key Generated Successfully")
-        st.code(key.decode())
+menu = st.selectbox("Choose Action", ["Encrypt File", "Decrypt File"])
 
-# ---------- ENCRYPT ----------
-elif menu == "Encrypt File":
-    uploaded_file = st.file_uploader("Upload File to Encrypt")
+# ---------------- ENCRYPT ----------------
+if menu == "Encrypt File":
+    uploaded_file = st.file_uploader("Upload file to encrypt")
+    password = st.text_input("Set Encryption Password", type="password")
 
-    if uploaded_file:
-        key = load_key()
-        if key is None:
-            st.warning("⚠️ Generate key first!")
-        elif st.button("Encrypt"):
-            encrypted = encrypt_data(uploaded_file.read(), key)
+    if uploaded_file and password:
+        if st.button("Encrypt"):
+            encrypted_data, file_hash = encrypt_file(uploaded_file.read(), password)
+
             filename = uploaded_file.name + ".encrypted"
+            hashfile = filename + ".hash"
 
-            with open(f"{ENC_DIR}/{filename}", "wb") as f:
-                f.write(encrypted)
+            with open(f"encrypted_files/{filename}", "wb") as f:
+                f.write(encrypted_data)
 
-            st.success("✅ File Encrypted")
-            st.download_button("Download Encrypted File", encrypted, filename)
+            with open(f"encrypted_files/{hashfile}", "w") as h:
+                h.write(file_hash)
 
-# ---------- DECRYPT ----------
+            st.success("✅ File encrypted successfully")
+            st.download_button("Download Encrypted File", encrypted_data, filename)
+
+# ---------------- DECRYPT ----------------
 elif menu == "Decrypt File":
-    encrypted_file = st.file_uploader("Upload Encrypted File")
+    encrypted_file = st.file_uploader("Upload encrypted file")
+    hash_file = st.file_uploader("Upload hash file")
+    password = st.text_input("Enter Password", type="password")
 
-    if encrypted_file:
-        key = load_key()
-        if key is None:
-            st.warning("⚠️ Key file not found!")
-        elif st.button("Decrypt"):
+    if encrypted_file and hash_file and password:
+        if st.session_state.attempts >= ATTEMPT_LIMIT:
+            st.error("❌ Too many wrong attempts. Access locked.")
+            st.stop()
+
+        if st.button("Decrypt"):
             try:
-                decrypted = decrypt_data(encrypted_file.read(), key)
-                original_name = encrypted_file.name.replace(".encrypted", "")
+                original_hash = hash_file.read().decode()
+                decrypted_data = decrypt_file(encrypted_file.read(), password, original_hash)
 
-                with open(f"{DEC_DIR}/{original_name}", "wb") as f:
-                    f.write(decrypted)
+                filename = encrypted_file.name.replace(".encrypted", "")
+                with open(f"decrypted_files/{filename}", "wb") as f:
+                    f.write(decrypted_data)
 
-                st.success("✅ File Decrypted")
-                st.download_button("Download Decrypted File", decrypted, original_name)
+                st.success("✅ File decrypted & integrity verified")
+                st.download_button("Download Decrypted File", decrypted_data, filename)
+                st.session_state.attempts = 0
 
-            except Exception:
-                st.error("❌ Invalid key or corrupted file")
+            except:
+                st.session_state.attempts += 1
+                st.error(f"❌ Wrong password or tampered file (Attempt {st.session_state.attempts}/3)")
