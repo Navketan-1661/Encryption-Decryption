@@ -1,5 +1,7 @@
 import streamlit as st
 import os
+import re
+import sqlite3
 import hashlib
 import base64
 import requests
@@ -8,215 +10,187 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives import hashes
 from cryptography.fernet import Fernet
 
-# ---------------- SAFE OPTIONAL IMPORT ----------------
-try:
-    from scapy.all import rdpcap
-    SCAPY_OK = True
-except:
-    SCAPY_OK = False
-
 # ---------------- CONFIG ----------------
 st.set_page_config(page_title="Cyber Security Toolkit", layout="wide")
 
 for folder in ["encrypted_files", "decrypted_files", "stego_images"]:
     os.makedirs(folder, exist_ok=True)
 
-# =====================================================
-# 🔐 ENCRYPTION FUNCTIONS
-# =====================================================
-def derive_key(password, salt):
-    kdf = PBKDF2HMAC(
-        algorithm=hashes.SHA256(),
-        length=32,
-        salt=salt,
-        iterations=100000
-    )
-    return base64.urlsafe_b64encode(kdf.derive(password.encode()))
+# ---------------- DATABASE ----------------
+conn = sqlite3.connect("users.db", check_same_thread=False)
+cur = conn.cursor()
+cur.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    username TEXT PRIMARY KEY,
+    password TEXT
+)
+""")
+conn.commit()
 
-def encrypt_data(data, password):
-    salt = os.urandom(16)
-    key = derive_key(password, salt)
-    encrypted = Fernet(key).encrypt(data)
-    return salt + encrypted, hashlib.sha256(data).hexdigest()
+# ---------------- SESSION ----------------
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+if "user" not in st.session_state:
+    st.session_state.user = ""
 
-def decrypt_data(data, password, original_hash):
-    salt = data[:16]
-    enc = data[16:]
-    key = derive_key(password, salt)
-    dec = Fernet(key).decrypt(enc)
-    if hashlib.sha256(dec).hexdigest() != original_hash:
-        raise ValueError("Integrity failed")
-    return dec
+# ---------------- PASSWORD VALIDATION ----------------
+def valid_password(password):
+    pattern = r'^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&]).{8,}$'
+    return re.match(pattern, password)
 
-# =====================================================
-# 🕷️ VULNERABILITY SCANNERS
-# =====================================================
-def scan_file(file):
-    issues = []
-    if file.size > 5 * 1024 * 1024:
-        issues.append("Large file size detected")
-    if file.name.endswith((".exe", ".bat", ".js")):
-        issues.append("Executable file – potential risk")
-    return issues or ["No major file vulnerabilities found"]
+def hash_password(password):
+    return hashlib.sha256(password.encode()).hexdigest()
 
-def scan_website(url):
-    findings = []
-    if not url.startswith("http"):
-        return ["Invalid URL format"]
+# ---------------- AUTH FUNCTIONS ----------------
+def register_user(username, password):
     try:
-        r = requests.get(url, timeout=5)
-        h = r.headers
-        if "Content-Security-Policy" not in h:
-            findings.append("Missing Content-Security-Policy")
-        if "X-Frame-Options" not in h:
-            findings.append("Missing X-Frame-Options")
-        if "Strict-Transport-Security" not in h:
-            findings.append("Missing HSTS header")
+        cur.execute("INSERT INTO users VALUES (?,?)",
+                    (username, hash_password(password)))
+        conn.commit()
+        return True
     except:
-        findings.append("Website unreachable")
-    return findings or ["No major web vulnerabilities found"]
+        return False
+
+def login_user(username, password):
+    cur.execute("SELECT * FROM users WHERE username=? AND password=?",
+                (username, hash_password(password)))
+    return cur.fetchone()
 
 # =====================================================
-# 🎣 PHISHING LINK DETECTOR
+# 🔐 LOGIN / REGISTER PAGE
 # =====================================================
-def phishing_check(url):
-    flags = []
-    if not url.startswith("http"):
-        flags.append("URL does not start with http/https")
-    if "@" in url:
-        flags.append("Contains '@' symbol")
-    if url.startswith("http://"):
-        flags.append("Not using HTTPS")
-    if url.count("-") > 3:
-        flags.append("Too many hyphens in URL")
-    return flags or ["No obvious phishing indicators"]
+if not st.session_state.logged_in:
+    st.title("🔐 Cyber Security Toolkit")
 
-# =====================================================
-# 🖼️ IMAGE STEGANOGRAPHY
-# =====================================================
-def hide_text(image, text):
-    img = image.convert("RGB")
-    pixels = img.load()
-    text += "#####"
-    bits = ''.join(format(ord(c), '08b') for c in text)
-    i = 0
-    for y in range(img.height):
-        for x in range(img.width):
-            if i < len(bits):
-                r, g, b = pixels[x, y]
-                pixels[x, y] = ((r & ~1) | int(bits[i]), g, b)
-                i += 1
-    return img
+    choice = st.selectbox("Select Option", ["Login", "Register"])
 
-def reveal_text(image):
-    img = image.convert("RGB")
-    pixels = img.load()
-    bits = ""
-    for y in range(img.height):
-        for x in range(img.width):
-            bits += str(pixels[x, y][0] & 1)
-    chars = [bits[i:i+8] for i in range(0, len(bits), 8)]
-    msg = ""
-    for c in chars:
-        msg += chr(int(c, 2))
-        if msg.endswith("#####"):
-            return msg.replace("#####", "")
-    return "No hidden message found"
+    username = st.text_input("Username")
+    password = st.text_input("Password", type="password")
 
-# =====================================================
-# 📡 PACKET ANALYZER
-# =====================================================
-def analyze_pcap(file):
-    if not SCAPY_OK:
-        return ["Scapy not available in this environment"]
-    packets = rdpcap(file)
-    summary = {}
-    for pkt in packets:
-        proto = pkt.summary().split()[0]
-        summary[proto] = summary.get(proto, 0) + 1
-    return summary
+    if choice == "Register":
+        if st.button("Register"):
+            if not valid_password(password):
+                st.error(
+                    "Password must contain uppercase, lowercase, number, special character & minimum 8 characters"
+                )
+            elif register_user(username, password):
+                st.success("Registration successful! Please login.")
+            else:
+                st.error("Username already exists")
 
-# =====================================================
-# 📶 WIFI SECURITY ANALYZER
-# =====================================================
-def wifi_audit():
-    return [
-        "Use WPA2/WPA3 encryption",
-        "Disable WPS",
-        "Change default router credentials",
-        "Use strong Wi-Fi password",
-        "Update router firmware regularly"
-    ]
-
-# =====================================================
-# 🧭 SIDEBAR NAVIGATION
-# =====================================================
-st.sidebar.title("🛡️ Cyber Security Toolkit")
-page = st.sidebar.radio("Select Module", [
-    "🔐 File Encryption",
-    "🕷️ Vulnerability Scanner",
-    "🎣 Phishing Detector",
-    "🖼️ Image Steganography",
-    "📡 Packet Analyzer",
-    "📶 Wi-Fi Security Analyzer"
-])
-
-# =====================================================
-# 🔐 FILE ENCRYPTION PAGE
-# =====================================================
-if page == "🔐 File Encryption":
-    st.header("Secure File Encryption")
-    f = st.file_uploader("Upload File")
-    pwd = st.text_input("Password", type="password")
-    if f and pwd and st.button("Encrypt"):
-        enc, h = encrypt_data(f.read(), pwd)
-        st.download_button("Download Encrypted File", enc, f.name + ".encrypted")
-
-# =====================================================
-# 🕷️ VULNERABILITY PAGE
-# =====================================================
-elif page == "🕷️ Vulnerability Scanner":
-    opt = st.selectbox("Scan Type", ["File", "Website"])
-    if opt == "File":
-        f = st.file_uploader("Upload File")
-        if f and st.button("Scan File"):
-            st.write(scan_file(f))
     else:
+        if st.button("Login"):
+            if login_user(username, password):
+                st.session_state.logged_in = True
+                st.session_state.user = username
+                st.success("Login successful")
+                st.rerun()
+            else:
+                st.error("Invalid username or password")
+
+# =====================================================
+# 🛡️ MAIN APPLICATION (AFTER LOGIN)
+# =====================================================
+else:
+    st.sidebar.success(f"Logged in as {st.session_state.user}")
+    if st.sidebar.button("Logout"):
+        st.session_state.logged_in = False
+        st.session_state.user = ""
+        st.rerun()
+
+    # =================================================
+    # 🔐 ENCRYPTION FUNCTIONS
+    # =================================================
+    def derive_key(password, salt):
+        kdf = PBKDF2HMAC(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=salt,
+            iterations=100000
+        )
+        return base64.urlsafe_b64encode(kdf.derive(password.encode()))
+
+    def encrypt_data(data, password):
+        salt = os.urandom(16)
+        key = derive_key(password, salt)
+        encrypted = Fernet(key).encrypt(data)
+        return salt + encrypted
+
+    # =================================================
+    # 🧭 SIDEBAR MENU
+    # =================================================
+    page = st.sidebar.radio("Select Module", [
+        "🔐 File Encryption",
+        "🕷️ Vulnerability Scanner",
+        "🎣 Phishing Detector",
+        "🖼️ Image Steganography",
+        "📶 Wi-Fi Security Analyzer"
+    ])
+
+    # =================================================
+    # 🔐 FILE ENCRYPTION
+    # =================================================
+    if page == "🔐 File Encryption":
+        st.header("Secure File Encryption")
+        file = st.file_uploader("Upload File")
+        password = st.text_input("Encryption Password", type="password")
+        if file and password and st.button("Encrypt"):
+            encrypted = encrypt_data(file.read(), password)
+            st.download_button("Download Encrypted File",
+                               encrypted, file.name + ".encrypted")
+
+    # =================================================
+    # 🕷️ VULNERABILITY SCANNER
+    # =================================================
+    elif page == "🕷️ Vulnerability Scanner":
         url = st.text_input("Enter Website URL")
-        if url and st.button("Scan Website"):
-            st.write(scan_website(url))
+        if url and st.button("Scan"):
+            try:
+                r = requests.get(url, timeout=5)
+                headers = r.headers
+                issues = []
+                if "Content-Security-Policy" not in headers:
+                    issues.append("Missing CSP Header")
+                if "X-Frame-Options" not in headers:
+                    issues.append("Missing X-Frame-Options")
+                st.write(issues or ["No major vulnerabilities"])
+            except:
+                st.error("Invalid or unreachable website")
 
-# =====================================================
-# 🎣 PHISHING PAGE
-# =====================================================
-elif page == "🎣 Phishing Detector":
-    url = st.text_input("Enter URL")
-    if url and st.button("Check URL"):
-        st.write(phishing_check(url))
+    # =================================================
+    # 🎣 PHISHING DETECTOR
+    # =================================================
+    elif page == "🎣 Phishing Detector":
+        link = st.text_input("Enter URL")
+        if link and st.button("Check"):
+            alerts = []
+            if not link.startswith("https"):
+                alerts.append("Not using HTTPS")
+            if "@" in link:
+                alerts.append("Contains @ symbol")
+            st.write(alerts or ["No phishing indicators found"])
 
-# =====================================================
-# 🖼️ STEGANOGRAPHY PAGE
-# =====================================================
-elif page == "🖼️ Image Steganography":
-    img = st.file_uploader("Upload Image")
-    msg = st.text_input("Secret Message")
-    if img and msg and st.button("Hide Message"):
-        st.image(hide_text(Image.open(img), msg))
-    if img and st.button("Reveal Message"):
-        st.write(reveal_text(Image.open(img)))
+    # =================================================
+    # 🖼️ IMAGE STEGANOGRAPHY
+    # =================================================
+    elif page == "🖼️ Image Steganography":
+        img = st.file_uploader("Upload Image")
+        secret = st.text_input("Secret Message")
+        if img and secret and st.button("Hide Message"):
+            image = Image.open(img)
+            st.image(image, caption="Steganography feature demo")
 
-# =====================================================
-# 📡 PACKET ANALYZER PAGE
-# =====================================================
-elif page == "📡 Packet Analyzer":
-    pcap = st.file_uploader("Upload PCAP file")
-    if pcap and st.button("Analyze"):
-        st.write(analyze_pcap(pcap))
-
-# =====================================================
-# 📶 WIFI ANALYZER PAGE
-# =====================================================
-elif page == "📶 Wi-Fi Security Analyzer":
-    st.subheader("Wi-Fi Security Best Practices")
-    for tip in wifi_audit():
-        st.success(tip)
+    # =================================================
+    # 📶 WIFI ANALYZER
+    # =================================================
+    elif page == "📶 Wi-Fi Security Analyzer":
+        st.subheader("Wi-Fi Security Best Practices")
+        tips = [
+            "Use WPA3 encryption",
+            "Disable WPS",
+            "Use strong Wi-Fi password",
+            "Change default router credentials",
+            "Update router firmware regularly"
+        ]
+        for t in tips:
+            st.success(t)
